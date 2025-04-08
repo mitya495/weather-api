@@ -4,6 +4,18 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from datetime import datetime
 import pytz
+import logging
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("weather_api.log"),  # Логи в файл
+        logging.StreamHandler()  # Логи в консоль (для Railway)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Создаем приложение FastAPI
 app = FastAPI()
@@ -47,22 +59,29 @@ def direction_to_short(degrees: float) -> str:
 def get_city_weather(city: str):
     """Получает погодные данные для указанного района."""
     if city not in CITIES:
+        logger.error(f"Город не найден: {city}")
         raise HTTPException(status_code=404, detail="Город не найден")
 
     lat, lon = CITIES[city]["lat"], CITIES[city]["lon"]
     api_key = os.getenv("TOMORROW_API_KEY")
     if not api_key:
+        logger.error("API ключ не найден в переменных окружения")
         raise HTTPException(status_code=500, detail="API ключ не найден")
 
-    # Формируем запрос к API Tomorrow.io для получения почасовых и дневных данных
+    # Формируем запрос к API Tomorrow.io
     url = f"https://api.tomorrow.io/v4/weather/forecast?location={lat},{lon}&timesteps=1h,1d&apikey={api_key}"
     try:
         response = requests.get(url)
         response.raise_for_status()
-        data = response.json()
-        formatted_data = format_weather_data(city, data)
+        api_data = response.json()
+        
+        # Логируем полный ответ API
+        logger.info(f"Ответ API для {city}: {api_data}")
+        
+        formatted_data = format_weather_data(city, api_data)
         return JSONResponse(content=formatted_data)
     except requests.RequestException as e:
+        logger.error(f"Ошибка при запросе к API для {city}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Ошибка при запросе к API: {str(e)}")
 
 # Функция для форматирования данных в требуемый JSON
@@ -75,6 +94,7 @@ def format_weather_data(city: str, data: dict) -> dict:
     daily = timelines.get("daily", [])
 
     if not hourly or not daily:
+        logger.error(f"Отсутствуют необходимые данные в ответе API для {city}: hourly={bool(hourly)}, daily={bool(daily)}")
         raise HTTPException(status_code=500, detail="Отсутствуют необходимые данные в ответе API")
 
     # Текущие погодные данные из первого элемента почасового прогноза
@@ -94,9 +114,13 @@ def format_weather_data(city: str, data: dict) -> dict:
         "uf_index": str(current.get("uvIndex", 0)),
         "moon": "Р 0,5 Восход: 13:14 Закат: 09:13",  # Замените на динамические данные, если доступны
         "data": "Шаблон",
-        "sunrise": daily[0]["values"]["sunriseTime"][11:16],
-        "sunset": daily[0]["values"]["sunsetTime"][11:16],
     }
+
+    # Восход и закат солнца с правильным преобразованием времени
+    sunrise_utc = datetime.fromisoformat(daily[0]["values"]["sunriseTime"].replace("Z", "+00:00"))
+    sunset_utc = datetime.fromisoformat(daily[0]["values"]["sunsetTime"].replace("Z", "+00:00"))
+    result["sunrise"] = sunrise_utc.astimezone(moscow_tz).strftime("%H:%M")
+    result["sunset"] = sunset_utc.astimezone(moscow_tz).strftime("%H:%M")
 
     # Дневной прогноз на 5 дней
     for i, day in enumerate(daily[:5], 1):
@@ -136,6 +160,7 @@ def format_weather_data(city: str, data: dict) -> dict:
 
 # Запуск сервера
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.environ.get("PORT", 8000))  # Railway использует переменную PORT
     import uvicorn
+    logger.info(f"Запуск сервера на порту {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
