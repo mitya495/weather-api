@@ -1,14 +1,14 @@
 import os
 import requests
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from typing import Optional
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
 TOMORROW_API_KEY = os.getenv("TOMORROW_API_KEY")
 
-# Список городов с координатами (можно расширить)
+# Список городов с координатами
 CITIES = {
     "Очаково-Матвеевское": {"lat": 55.6833, "lon": 37.4667},
     "Солнцево": {"lat": 55.6371, "lon": 37.3913},
@@ -23,7 +23,6 @@ CITIES = {
 def root():
     return {"message": "Привет, Railway!"}
 
-# Эндпоинт для получения погоды по конкретному городу
 @app.get("/weather/{city}")
 def get_city_weather(city: str):
     if not TOMORROW_API_KEY:
@@ -38,23 +37,17 @@ def get_city_weather(city: str):
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
-        # Преобразование данных в твой формат
         formatted_data = format_weather_data(city, data)
         return formatted_data
     except requests.RequestException as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
-# Функция для форматирования данных Tomorrow.io в твой формат
 def format_weather_data(city: str, data: dict) -> dict:
-    # Получаем текущие данные (minutely или hourly)
-    current = data.get("timelines", {}).get("hourly", [{}])[0].get("values", {})
-    daily = data.get("timelines", {}).get("daily", [])
-    hourly = data.get("timelines", {}).get("hourly", [])
-
-    # Маппинг погодных кодов Tomorrow.io на твои условия
+    # Маппинг погодных кодов Tomorrow.io
     weather_code_map = {
         1000: "Ясно",
-        1100: "Облачно",
+        1001: "Облачно",
+        1100: "Переменная облачность",
         1101: "Пасмурно",
         1102: "Туман",
         4000: "Небольшой дождь",
@@ -65,64 +58,74 @@ def format_weather_data(city: str, data: dict) -> dict:
         5001: "Сильный снег",
         5100: "Мокрый снег",
         8000: "Гроза",
-        # Добавь другие коды по документации Tomorrow.io
     }
+
+    # Текущие данные (берём из minutely[0] или hourly[0])
+    current = data.get("timelines", {}).get("minutely", [{}])[0].get("values", {})
+    hourly = data.get("timelines", {}).get("hourly", [])
+    daily = data.get("timelines", {}).get("daily", [])
+
+    # Если hourly пустой, используем minutely для текущих данных
+    if not hourly:
+        hourly = data.get("timelines", {}).get("minutely", [])
 
     # Текущие данные
     weather_code = current.get("weatherCode", 1000)
-    wind_direction = current.get("windDirection", 0)
-    wind_dir_short = direction_to_short(wind_direction)
+    wind_dir_short = direction_to_short(current.get("windDirection", 0))
 
-    # Форматируем текущие данные
     result = {
         "name": city,
         "temperature": f"{int(current.get('temperature', 0))}°",
         "feels_like": f"{int(current.get('temperatureApparent', 0))}°",
         "weather_condition": weather_code_map.get(weather_code, "Неизвестно"),
-        "wind_speed": f"{current.get('windSpeed', 0)} м/с, {wind_dir_short}",
-        "pressure": str(int(current.get("pressureSurfaceLevel", 0) * 0.750062)),  # Перевод из hPa в мм рт. ст.
+        "wind_speed": f"{current.get('windSpeed', 0):.1f} м/с, {wind_dir_short}",
+        "pressure": str(int(current.get("pressureSurfaceLevel", 0) * 0.750062)),  # hPa -> мм рт. ст.
         "humidity": f"{int(current.get('humidity', 0))}%",
-        "warnings": "Жёлтое предупреждение о погоде",  # Tomorrow.io может возвращать alerts
-        "air_quality": str(current.get("airQualityIndex", 0)),  # Проверить, есть ли в API
+        "warnings": "Нет предупреждений" if "alerts" not in data else "Жёлтое предупреждение о погоде",
+        "air_quality": "0",  # Tomorrow.io не даёт AQI в этом ответе
         "visibility": str(int(current.get("visibility", 10))),
         "uf_index": str(current.get("uvIndex", 0)),
-        "moon": "Р 0,5 Восход: 13:14 Закат: 09:13",  # Пока статично, можно добавить API
+        "moon": "Р 0,5 Восход: 13:14 Закат: 09:13",  # Пока статично
         "data": "Шаблон",
-        "sunrise": daily[0].get("values", {}).get("sunriseTime", "Восход: 08:00")[-8:-3],
-        "sunset": daily[0].get("values", {}).get("sunsetTime", "Закат: 17:00")[-8:-3],
+        "sunrise": daily[0].get("values", {}).get("sunriseTime", "06:00")[-8:-3],
+        "sunset": daily[0].get("values", {}).get("sunsetTime", "18:00")[-8:-3],
     }
 
-    # Дневные прогнозы (5 дней)
+    # Дневной прогноз (5 дней)
     for i, day in enumerate(daily[:5], 1):
         day_values = day.get("values", {})
-        result[f"condition_day_day{i}"] = weather_code_map.get(day_values.get("weatherCode", 1000), "Неизвестно")
-        result[f"condition_night_day{i}"] = weather_code_map.get(day_values.get("weatherCode", 1000), "Неизвестно")  # Ночь отдельно не даётся, можно улучшить
+        weather_code_day = day_values.get("weatherCode", 1000)
+        result[f"condition_day_day{i}"] = weather_code_map.get(weather_code_day, "Неизвестно")
+        result[f"condition_night_day{i}"] = weather_code_map.get(weather_code_day, "Неизвестно")  # Ночь не разделена
         result[f"temperature_day_day{i}"] = f"{int(day_values.get('temperatureMax', 0))}°"
         result[f"temperature_night_day{i}"] = f"{int(day_values.get('temperatureMin', 0))}°"
 
-    # Почасовые прогнозы (26 часов)
-    for i, hour in enumerate(hourly[:27]):
+    # Почасовой прогноз (26 часов)
+    for i, hour in enumerate(hourly[:26]):
         hour_values = hour.get("values", {})
         hour_time = hour.get("time", "")[-8:-3] if i > 0 else "Сейчас"
-        if "sunrise" in result and hour_time == result["sunrise"]: hour_time = "Восход"
-        if "sunset" in result and hour_time == result["sunset"]: hour_time = "Закат"
+        if hour_time == result["sunrise"]: hour_time = "Восход"
+        if hour_time == result["sunset"]: hour_time = "Закат"
+        weather_code_hour = hour_values.get("weatherCode", 1000)
+        wind_dir_short = direction_to_short(hour_values.get("windDirection", 0))
+        
         result[f"temperature_hour_{'now' if i == 0 else i}"] = f"{int(hour_values.get('temperature', 0))}°"
         result[f"time_hour_{'now' if i == 0 else i}"] = hour_time
-        result[f"wind_hour_{'now' if i == 0 else i}"] = f"{hour_values.get('windSpeed', 0)} м/с, {direction_to_short(hour_values.get('windDirection', 0))}"
+        result[f"wind_hour_{'now' if i == 0 else i}"] = f"{hour_values.get('windSpeed', 0):.1f} м/с, {wind_dir_short}"
         result[f"rain_prob_hour_{'now' if i == 0 else i}"] = f"{int(hour_values.get('precipitationProbability', 0))}%"
         result[f"pressure_hour_{'now' if i == 0 else i}"] = str(int(hour_values.get('pressureSurfaceLevel', 0) * 0.750062))
         result[f"uf_index_hour_{'now' if i == 0 else i}"] = str(hour_values.get("uvIndex", 0))
         result[f"humidity_hour_{'now' if i == 0 else i}"] = f"{int(hour_values.get('humidity', 0))}%"
-        result[f"condition_hour_{'now' if i == 0 else i}"] = weather_code_map.get(hour_values.get("weatherCode", 1000), "Неизвестно")
+        result[f"condition_hour_{'now' if i == 0 else i}"] = weather_code_map.get(weather_code_hour, "Неизвестно")
 
-    # Дни недели (можно улучшить с реальными датами)
-    result["day3"] = "Ср"
-    result["day4"] = "Чт"
-    result["day5"] = "Пт"
+    # Дни недели (примерно, можно улучшить с реальными датами)
+    today = datetime.utcnow()
+    result["day3"] = (today + timedelta(days=2)).strftime("%a")[:2]
+    result["day4"] = (today + timedelta(days=3)).strftime("%a")[:2]
+    result["day5"] = (today + timedelta(days=4)).strftime("%a")[:2]
 
     return result
 
-# Вспомогательная функция для направления ветра
 def direction_to_short(degrees: float) -> str:
     directions = ["С", "СВ", "В", "ЮВ", "Ю", "ЮЗ", "З", "СЗ"]
     index = round(degrees / 45) % 8
