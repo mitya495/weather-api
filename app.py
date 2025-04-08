@@ -1,12 +1,13 @@
+import os
 from fastapi import FastAPI
+import uvicorn
 
 app = FastAPI()
 
 @app.get("/")
-def read_root():
-    return {"message": "Hello, Railway!"}
+def root():
+    return {"message": "Привет, Railway!"}
 
-@app.get("/weather")
-def get_weather(city: str = "Moscow"):
-    # Замените это место на реальную логику получения данных о погоде.
-    return {"city": city, "weather": "sunny", "temperature": "25°C"}
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port)
