@@ -85,6 +85,7 @@ def format_weather_data(city: str, data: dict) -> dict:
         "sunset": daily[0].get("values", {}).get("sunsetTime", "18:00")[11:16],   # HH:MM
     }
 
+
     # Дневной прогноз (5 дней)
     for i, day in enumerate(daily[:5], 1):
         day_values = day.get("values", {})
