@@ -3,12 +3,12 @@ import requests
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
+import pytz
 
 app = FastAPI()
 
 TOMORROW_API_KEY = os.getenv("TOMORROW_API_KEY")
 
-# Список городов с координатами
 CITIES = {
     "Очаково-Матвеевское": {"lat": 55.6833, "lon": 37.4667},
     "Солнцево": {"lat": 55.6371, "lon": 37.3913},
@@ -43,31 +43,25 @@ def get_city_weather(city: str):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 def format_weather_data(city: str, data: dict) -> dict:
-    # Маппинг погодных кодов Tomorrow.io
     weather_code_map = {
-        1000: "Ясно",
-        1001: "Облачно",
-        1100: "Переменная облачность",
-        1101: "Пасмурно",
-        1102: "Туман",
-        4000: "Небольшой дождь",
-        4001: "Умеренный дождь",
-        4200: "Сильный дождь",
-        4201: "Ледяной дождь",
-        5000: "Небольшой снег",
-        5001: "Сильный снег",
-        5100: "Мокрый снег",
+        1000: "Ясно", 1001: "Облачно", 1100: "Переменная облачность", 1101: "Пасмурно",
+        1102: "Туман", 4000: "Небольшой дождь", 4001: "Умеренный дождь", 4200: "Сильный дождь",
+        4201: "Ледяной дождь", 5000: "Небольшой снег", 5001: "Сильный снег", 5100: "Мокрый снег",
         8000: "Гроза",
     }
 
-    # Текущие данные (берём из minutely[0] или hourly[0])
+    # Временная зона Москвы
+    moscow_tz = pytz.timezone("Europe/Moscow")
+    now_utc = datetime.now(pytz.utc)
+
+    # Данные из API
     current = data.get("timelines", {}).get("minutely", [{}])[0].get("values", {})
     hourly = data.get("timelines", {}).get("hourly", [])
     daily = data.get("timelines", {}).get("daily", [])
 
-    # Если hourly пустой, используем minutely для текущих данных
-    if not hourly:
-        hourly = data.get("timelines", {}).get("minutely", [])
+    # Если hourly пустой, используем minutely, но предупреждаем
+    if not hourly and len(data.get("timelines", {}).get("minutely", [])) > 0:
+        hourly = data.get("timelines", {}).get("minutely", [])[:26]  # Ограничиваем до 26
 
     # Текущие данные
     weather_code = current.get("weatherCode", 1000)
@@ -79,50 +73,49 @@ def format_weather_data(city: str, data: dict) -> dict:
         "feels_like": f"{int(current.get('temperatureApparent', 0))}°",
         "weather_condition": weather_code_map.get(weather_code, "Неизвестно"),
         "wind_speed": f"{current.get('windSpeed', 0):.1f} м/с, {wind_dir_short}",
-        "pressure": str(int(current.get("pressureSurfaceLevel", 0) * 0.750062)),  # hPa -> мм рт. ст.
+        "pressure": str(int(current.get("pressureSurfaceLevel", 0) * 0.750062)),
         "humidity": f"{int(current.get('humidity', 0))}%",
         "warnings": "Нет предупреждений" if "alerts" not in data else "Жёлтое предупреждение о погоде",
-        "air_quality": "0",  # Tomorrow.io не даёт AQI в этом ответе
+        "air_quality": "0",
         "visibility": str(int(current.get("visibility", 10))),
         "uf_index": str(current.get("uvIndex", 0)),
         "moon": "Р 0,5 Восход: 13:14 Закат: 09:13",  # Пока статично
         "data": "Шаблон",
-        "sunrise": daily[0].get("values", {}).get("sunriseTime", "06:00")[-8:-3],
-        "sunset": daily[0].get("values", {}).get("sunsetTime", "18:00")[-8:-3],
+        "sunrise": daily[0].get("values", {}).get("sunriseTime", "06:00")[11:16],  # HH:MM
+        "sunset": daily[0].get("values", {}).get("sunsetTime", "18:00")[11:16],   # HH:MM
     }
 
     # Дневной прогноз (5 дней)
     for i, day in enumerate(daily[:5], 1):
         day_values = day.get("values", {})
         weather_code_day = day_values.get("weatherCode", 1000)
+        day_date = datetime.fromisoformat(day.get("time").replace("Z", "+00:00")).astimezone(moscow_tz)
         result[f"condition_day_day{i}"] = weather_code_map.get(weather_code_day, "Неизвестно")
-        result[f"condition_night_day{i}"] = weather_code_map.get(weather_code_day, "Неизвестно")  # Ночь не разделена
+        result[f"condition_night_day{i}"] = weather_code_map.get(weather_code_day, "Неизвестно")
         result[f"temperature_day_day{i}"] = f"{int(day_values.get('temperatureMax', 0))}°"
         result[f"temperature_night_day{i}"] = f"{int(day_values.get('temperatureMin', 0))}°"
+        if i > 2:  # Дни недели для 3, 4, 5
+            result[f"day{i}"] = day_date.strftime("%a")[:2]
 
     # Почасовой прогноз (26 часов)
     for i, hour in enumerate(hourly[:26]):
         hour_values = hour.get("values", {})
-        hour_time = hour.get("time", "")[-8:-3] if i > 0 else "Сейчас"
-        if hour_time == result["sunrise"]: hour_time = "Восход"
-        if hour_time == result["sunset"]: hour_time = "Закат"
+        hour_time_utc = datetime.fromisoformat(hour.get("time").replace("Z", "+00:00"))
+        hour_time_moscow = hour_time_utc.astimezone(moscow_tz)
+        hour_str = "Сейчас" if i == 0 else hour_time_moscow.strftime("%H:%M")
+        if hour_str == result["sunrise"]: hour_str = "Восход"
+        if hour_str == result["sunset"]: hour_str = "Закат"
         weather_code_hour = hour_values.get("weatherCode", 1000)
         wind_dir_short = direction_to_short(hour_values.get("windDirection", 0))
-        
+
         result[f"temperature_hour_{'now' if i == 0 else i}"] = f"{int(hour_values.get('temperature', 0))}°"
-        result[f"time_hour_{'now' if i == 0 else i}"] = hour_time
+        result[f"time_hour_{'now' if i == 0 else i}"] = hour_str
         result[f"wind_hour_{'now' if i == 0 else i}"] = f"{hour_values.get('windSpeed', 0):.1f} м/с, {wind_dir_short}"
         result[f"rain_prob_hour_{'now' if i == 0 else i}"] = f"{int(hour_values.get('precipitationProbability', 0))}%"
         result[f"pressure_hour_{'now' if i == 0 else i}"] = str(int(hour_values.get('pressureSurfaceLevel', 0) * 0.750062))
         result[f"uf_index_hour_{'now' if i == 0 else i}"] = str(hour_values.get("uvIndex", 0))
         result[f"humidity_hour_{'now' if i == 0 else i}"] = f"{int(hour_values.get('humidity', 0))}%"
         result[f"condition_hour_{'now' if i == 0 else i}"] = weather_code_map.get(weather_code_hour, "Неизвестно")
-
-    # Дни недели (примерно, можно улучшить с реальными датами)
-    today = datetime.utcnow()
-    result["day3"] = (today + timedelta(days=2)).strftime("%a")[:2]
-    result["day4"] = (today + timedelta(days=3)).strftime("%a")[:2]
-    result["day5"] = (today + timedelta(days=4)).strftime("%a")[:2]
 
     return result
 
